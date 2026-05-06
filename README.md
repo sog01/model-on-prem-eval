@@ -149,6 +149,119 @@ recommendation and reasoning is in `conclusion.md`.
 For complex skill.md-style instruction following, **use `gemma3:27b`**.
 For tight VRAM or MITRE-only workloads, Foundation-Sec is the fallback.
 
+## Playbook benchmark with mock MCP tools
+
+A second benchmark, separate from the 32-case classification one above:
+`playbook_bench.py` measures how well each model can read a SKILL.md-style
+incident playbook (`incident_playbook.md`) and act on it — pulling entities
+out of an alert, enriching them with mock SOC tools, and returning a
+structured JSON verdict.
+
+The model sees five MCP servers (in `mcp_servers/`):
+
+- `openvas` — `scan_host`, `get_scan_results` (vuln data per host)
+- `siem` — `query_logs` (canned hits keyed by IP / account / EventID)
+- `threat_intel` — `lookup_ip`, `lookup_domain`, `lookup_hash`
+- `cmdb` — `get_asset` (criticality, owner, tags)
+- `edr` — `get_processes`, `isolate_host`
+
+Each is a small `FastMCP` stdio server with deterministic fixtures keyed
+off the 10 scenarios in `playbook_cases.py` (derived from the original
+32-case set). The harness uses `pydantic-ai` `Agent + MCPServerStdio` and
+talks to Ollama through pydantic-ai's native `OllamaModel` provider.
+
+### Three modes
+
+Only 3 of the 7 Ollama models in the original bench advertise the `tools`
+capability (`llama3.1:8b`, `qwen3:14b`, `qwen3:32b`). Ollama's OpenAI-compat
+endpoint refuses tool-call requests for the rest. To measure all models on
+the same prompt, the harness supports three paths:
+
+- **tool-calling**: real multi-turn loop driven by the model's native
+  OpenAI `tool_calls` payloads. Only works for models that advertise the
+  `tools` capability AND can produce a valid `tool_calls` payload at Q4_K_M.
+- **harness-executed** (the apples-to-apples mode): two-round flow. Round 1,
+  the model returns a `{"tools_to_call": [{server, tool, args}, ...]}` plan
+  as JSON. The harness dispatches each entry to the real MCP servers via
+  `MCPServerStdio.direct_call_tool`. Round 2, the harness sends the tool
+  results back as a user message and the model returns the final verdict
+  JSON. **The harness, not the model, drives tool dispatch** — so even
+  models without native `tools` capability execute real tools and see real
+  fixture data.
+- **describe-only**: single-shot, no execution. The model lists the tools
+  it *would* have called inside `tools_used`. Tests planning ability in
+  isolation.
+
+The harness auto-dispatches: tool-capable models run tool-calling, the
+rest fall back to harness-executed. `--mode {tool-calling,harness-executed,describe-only}`
+forces a specific mode.
+
+### Scoring (per case)
+
+- **Verdict**: `incident` vs `benign` (35%)
+- **Severity**: ladder match `info`/`low`/`medium`/`high`/`critical` (15%)
+- **MITRE**: any expected technique ID matches (25%)
+- **Tool selection**: did the model call/list at least one of the
+  acceptable minimum-tool subsets for that case (25%)
+
+Plus side-flags: format failure (no parseable JSON), forbidden-tool calls
+(e.g. `edr.isolate_host` on a benign case), and not-found responses
+(hallucinated entities).
+
+### Headline: harness-executed mode (every model sees real fixture data)
+
+| Model | Composite | Verdict | Severity | MITRE | Tools | p50 latency |
+|---|---|---|---|---|---|---|
+| **gemma3:27b** | **96%** | 10/10 | 9/10 | 9/10 | **10/10** | 9.3 s |
+| llama3.1:8b | 90% | **10/10** | **10/10** | 6/10 | **10/10** | 3.3 s |
+| Foundation-Sec-8B | 88% | **10/10** | **10/10** | 7/10 | 8/10 | **2.1 s** |
+| qwen3:14b | 72% | 8/10 | 8/10 | 4/10 | 9/10 | 21.9 s |
+| ZySec-7B | 68% | 9/10 | 9/10 | 2/10 | 7/10 | 1.7 s |
+| Lily-Cyber-7B | 14% | 0/10 | 6/10 | 2/10 | 0/10 | 4.4 s |
+
+### Three-mode comparison
+
+| Model | Tool-calling | Harness-executed | Describe-only |
+|---|---|---|---|
+| gemma3:27b | refused† | **96%** | 90% |
+| llama3.1:8b | 15% (format-fail) | **90%** | 85% |
+| Foundation-Sec-8B | refused† | **88%** | 80% |
+| qwen3:14b | **80%** | 72% | — |
+| ZySec-7B | refused† | 68% | 71% |
+| Lily-Cyber-7B | refused† | 14% | 11% |
+
+† = Ollama refuses tool-calling for models without the `tools` capability.
+
+Three observations:
+
+1. **Harness-executed beats describe-only for every reasoning-capable
+   model** because the model now sees actual fixture data (e.g. `verdict:
+   malicious, tags: [tor-exit]`) and can use it to pick the right MITRE
+   technique. Gemma3 jumps from 90→96% specifically because MITRE
+   accuracy goes 7/10 → 9/10 with grounded reasoning.
+2. **Llama3.1's 15% tool-calling collapse was format, not reasoning.**
+   Same Q4_K_M weights, same playbook — when the harness drives dispatch
+   instead of demanding native `tool_calls` JSON, llama3.1 jumps from
+   2/10 verdict to 10/10. The model understood the playbook all along;
+   it just couldn't produce the OpenAI tool-call wire format reliably.
+3. **Qwen3:14b regresses in harness-executed (-8 vs native).** Qwen3
+   trained heavily on the native protocol; forcing it through a 2-round
+   JSON-plan flow loses information. For qwen3, prefer native tool-calling.
+
+Full breakdown including per-case tables and architecture diagram:
+`playbook-comparison.md`. Per-model transcripts in `results-playbook-*.md`.
+
+### Running the playbook bench
+
+```
+pip install -r requirements.txt
+python3 playbook_bench.py --model gemma3:27b                       # auto: harness-executed
+python3 playbook_bench.py --model qwen3:14b                        # auto: tool-calling
+python3 playbook_bench.py --model llama3.1:8b --mode harness-executed
+python3 playbook_bench.py --model gemma3:27b --describe-only       # planning only
+python3 playbook_bench.py --cases PB-1,PB-7                        # subset
+```
+
 ## Scoring notes
 
 - Incident scoring looks at the first ~300 characters of the reply for a verdict

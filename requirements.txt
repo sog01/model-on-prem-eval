@@ -1,2 +1,4 @@
 drain3>=0.9.11
 psutil>=5.9
+pydantic-ai>=1.0
+mcp>=1.0
