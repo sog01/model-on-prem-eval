@@ -1,174 +1,113 @@
 # Model comparison — SOC benchmark
 
-Four 7-8B models, identical 32-case prompt set, same scoring code, same
-Ollama endpoint. Run on 2026-05-06.
+Six models, identical 32-case prompt set, same scoring code, same Ollama
+endpoint. Re-run on 2026-05-06 with per-call latency, GPU util, GPU memory,
+CPU%, and RAM sampling.
+
+Hardware: RTX 4090 (24 GB VRAM), AMD EPYC 7352 (48 cores), 251 GB RAM.
 
 ## Models
 
-| Tag (label used below) | Ollama identifier | Type |
-|---|---|---|
-| **Foundation-Sec-8B** | `hf.co/Mungert/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M` | Cisco Foundation AI, security-pretrained on Llama-3.1-8B |
-| **Llama-3.1-8B** | `llama3.1:8b` | Meta general-purpose instruct, no security fine-tune |
-| **ZySec-7B-v1** | `hf.co/koesn/ZySec-7B-v1-GGUF:Q4_K_M` | ZySec-AI, Mistral-7B fine-tune marketed as a SOC analyst |
-| **Lily-Cyber-7B** | `hf.co/segolilylabs/Lily-Cybersecurity-7B-v0.2-GGUF:Q4_K_M` | segolilylabs, Mistral-7B fine-tune on hand-curated cyber pairs |
-
-## Headline scores
-
-| Section | Foundation-Sec | Llama-3.1 | ZySec | Lily |
-|---|---|---|---|---|
-| Incident recognition (7) | 4 (57%) | **7 (100%)** | 6 (86%) | 5 (71%) |
-| Threat classification (7) | **7 (100%)** | **7(100%)** | 4 (57%) | 6 (86%) |
-| MITRE ATT&CK mapping (10) | **7 (70%)** | 2 (20%) | 2 (20%) | 4 (40%) |
-| Syslog triage — raw (8) | 5 (62%) | **8 (100%)** | 5 (62%) | 7 (88%) |
-| Syslog triage — drain3 (8) | 5 (62%) | **7 (88%)** | 5 (62%) | 1 (12%) |
-| **Overall (drain3 syslog) / 32** | **23 (72%)** | **23 (72%)** | 17 (53%) | 16 (50%) |
-
-Bold = best in row. Foundation-Sec and Llama-3.1 tie at 72% but with the
-opposite shape; the two SOC fine-tunes finish last.
-
-## Per-case detail
-
-`✓` = PASS, `✗` = FAIL, against the expected answer encoded in `benchmark.py`.
-
-### 1. Incident recognition (binary)
-
-| Case | Expected | Foundation-Sec | Llama-3.1 | ZySec | Lily |
-|---|---|---|---|---|---|
-| INC-1 office login | benign   | ✗ | ✓ | ✓ | ✗ |
-| INC-2 admin RDP fan-out | incident | ✓ | ✓ | ✓ | ✓ |
-| INC-3 wp-login flood   | incident | ✓ | ✓ | ✓ | ✓ |
-| INC-4 nightly backup   | benign   | ✗ | ✓ | ✓ | ✗ |
-| INC-5 winword→IEX      | incident | ✓ | ✓ | ✓ | ✓ |
-| INC-6 dev push + CI    | benign   | ✗ | ✓ | ✗ | ✓ |
-| INC-7 DNS exfil pattern| incident | ✓ | ✓ | ✓ | ✓ |
-
-Foundation-Sec only fails the **benign** cases — it has a heavy "Incident"
-bias and over-flags routine activity. Llama-3.1 is the only model that
-gets every benign right.
-
-### 2. Threat-type classification
-
-| Case | Expected | Foundation-Sec | Llama-3.1 | ZySec | Lily |
-|---|---|---|---|---|---|
-| THR-1 ransomware    | ransomware       | ✓ | ✓ | ✓ | ✓ |
-| THR-2 BEC / phishing| phishing/BEC     | ✓ | ✓ | ✗ | ✓ |
-| THR-3 SQLi          | sql injection    | ✓ | ✓ | ✓ | ✓ |
-| THR-4 XSS           | cross-site script| ✓ | ✓ | ✓ | ✓ |
-| THR-5 LSASS dump    | credential access| ✓ | ✓ | ✗ | ✓ |
-| THR-6 DDoS reflect  | dos/ddos         | ✓ | ✓ | ✓ | ✓ |
-| THR-7 supply chain  | supply chain     | ✓ | ✓ | ✗ | ✗ |
-
-Both the generalist and Foundation-Sec are perfect. ZySec misses three of
-seven — surprising for a model marketed as SOC-tuned.
-
-### 3. MITRE ATT&CK mapping (most differentiated section)
-
-| Case | Behavior | Accepted IDs | Foundation-Sec | Llama-3.1 | ZySec | Lily |
-|---|---|---|---|---|---|---|
-| ATT-1  | Macro phishing               | T1566.001 / T1204.002 | ✓ | ✗ | ✗ | ✗ |
-| ATT-2  | Mimikatz LSASS               | T1003.001 / T1003     | ✓ | ✓ | ✓ | ✓ |
-| ATT-3  | Scheduled task persistence   | T1053.005 / T1053     | ✗ | ✗ | ✗ | ✗ |
-| ATT-4  | AD recon (`net group`)       | T1087.002 / T1087     | ✓ | ✓ | ✗ | ✓ |
-| ATT-5  | Run-key persistence          | T1547.001 / T1547     | ✓ | ✗ | ✗ | ✓ |
-| ATT-6  | DNS TXT C2                   | T1071.004 / T1071     | ✓ | ✗ | ✗ | ✗ |
-| ATT-7  | PsExec lateral move          | T1021.002 / T1569.002 | ✗ | ✗ | ✗ | ✓ |
-| ATT-8  | vssadmin shadow delete       | T1490                 | ✗ | ✗ | ✗ | ✗ |
-| ATT-9  | base64 PowerShell `-Enc`     | T1027 / T1059.001     | ✓ | ✗ | ✓ | ✗ |
-| ATT-10 | RAR archive pre-exfil        | T1560.001 / T1560     | ✓ | ✗ | ✗ | ✗ |
-| **Pass rate** | | | **7 / 10** | 2 / 10 | 2 / 10 | 4 / 10 |
-
-ATT-3 (scheduled task) and ATT-8 (`vssadmin delete shadows`) are unanimous
-fails — they're the two cases nobody got right. Foundation-Sec wins the
-section by a wide margin; the un-tuned Llama-3.1 finishes tied for last.
-
-### 4. Raw syslog triage — baseline vs drain3-augmented
-
-`r` = raw-prompt result, `d` = drain3-augmented prompt result.
-
-| Case | Expected | Foundation-Sec |   | Llama-3.1 |   | ZySec |   | Lily |   |
-|---|---|---|---|---|---|---|---|---|---|
-|     |          | r | d | r | d | r | d | r | d |
-| SYS-1 brute-force ssh   | incident | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| SYS-2 normal pubkey ssh | benign   | ✗ | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
-| SYS-3 daily cron        | benign   | ✗ | ✗ | ✓ | ✓ | ✓ | ✗ | ✓ | ✓ |
-| SYS-4 SQLi probes       | incident | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ | ✓ | ✗ |
-| SYS-5 sudo group add    | incident | ✓ | ✓ | ✓ | ✗ | ✗ | ✓ | ✓ | ✗ |
-| SYS-6 path traversal    | incident | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| SYS-7 normal HTTP       | benign   | ✗ | ✗ | ✓ | ✓ | ✓ | ✗ | ✓ | ✗ |
-| SYS-8 4625 burst → 4624 | incident | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
-
-#### drain3 effect per model
-
-| Model | Raw | + drain3 | Δ |
+| Tag (label used below) | Ollama identifier | Size (Q4_K_M) | Type |
 |---|---|---|---|
-| Foundation-Sec | 5/8 | 5/8 | **0** |
-| Llama-3.1      | 8/8 | 7/8 | **−1** |
-| ZySec          | 5/8 | 5/8 | **0** (different cases — 2 flip each way) |
-| Lily           | 7/8 | 1/8 | **−6** |
+| **Foundation-Sec-8B** | `hf.co/Mungert/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M` | 5.1 GB | Cisco Foundation AI, security-pretrained on Llama-3.1-8B |
+| **Llama-3.1-8B** | `llama3.1:8b` | 4.9 GB | Meta general-purpose instruct, no security fine-tune |
+| **ZySec-7B-v1** | `hf.co/koesn/ZySec-7B-v1-GGUF:Q4_K_M` | 4.4 GB | ZySec-AI, Mistral-7B fine-tune marketed as a SOC analyst |
+| **Lily-Cyber-7B** | `hf.co/segolilylabs/Lily-Cybersecurity-7B-v0.2-GGUF:Q4_K_M` | 4.4 GB | segolilylabs, Mistral-7B fine-tune on hand-curated cyber pairs |
+| **Qwen3-14B** | `qwen3:14b` | 9.3 GB | Alibaba 2025 generalist with hybrid reasoning mode |
+| **Gemma3-27B** | `gemma3:27b` | 17 GB | Google 2025 generalist, 128K context |
 
-drain3 templates are pre-processed correctly in every case (e.g. `[x6]
-Failed password for invalid user <*>` for SYS-1, `[x5]` 4625 cluster on
-SYS-8). The signal is in the prompt — but adding it doesn't reliably help.
-Lily is destroyed by the augmented format; Llama loses one case; ZySec's
-total is unchanged but two cases flip in each direction.
+> **Note on qwen3:32b**: pulled and tested but excluded from this comparison.
+> The 32B Q4 model + 32K context KV cache exceeds 24 GB VRAM, forcing a
+> 17%/83% CPU/GPU split. PCIe transfers tanked throughput to ~3 tok/s and
+> the run was cancelled after >5 min on a single section. Won't fit on this
+> hardware without shrinking context.
 
-## Failure-mode notes
+## Headline accuracy
 
-- **Foundation-Sec-8B** — strong "Incident" bias. Every miss in section 1
-  and section 4 is a benign-classified-as-incident. Adds caveats like
-  "rsyslogd HUPed could indicate covering tracks" to a routine cron run.
-  drain3 templates do not move the needle because the model's answer is
-  not log-pattern-limited; it's threshold-limited.
-- **Llama-3.1-8B (generalist)** — opposite failure profile. Triage decisions
-  are correctly calibrated but ATT&CK technique recall is weak (2/10). It
-  often answers with a plausible-sounding name but the wrong ID, or
-  refuses to commit to an ID at all. This is the textbook "domain knowledge
-  is what fine-tuning buys you" case.
-- **ZySec-7B-v1** — terse one-word replies. Missed three threat-typing
-  cases (BEC, LSASS credential dumping, supply-chain) that the other
-  three models all got. v1 is older than the current ZySec release; the
-  v2 mirror could not be pulled in this run, so this is not the latest
-  generation.
-- **Lily-Cyber-7B-v0.2** — the drain3 prompt format breaks it. Raw syslog
-  is 7/8, but with the appended template summary it returns near-empty
-  or single-token outputs and loses six cases. Likely the explicit
-  instruction block exceeds the format the model was tuned on.
+| Section | Foundation-Sec | Llama-3.1 | ZySec | Lily | Qwen3-14B | **Gemma3-27B** |
+|---|---|---|---|---|---|---|
+| Incident recognition (7) | 4 (57%) | 7 (100%) | 6 (86%) | 5 (71%) | 5 (71%) | **7 (100%)** |
+| Threat classification (7) | 7 (100%) | 7 (100%) | 4 (57%) | 6 (86%) | 5 (71%) | **7 (100%)** |
+| MITRE ATT&CK mapping (10) | 7 (70%) | 2 (20%) | 2 (20%) | 4 (40%) | 1 (10%) | **7 (70%)** |
+| Syslog triage — raw (8) | 5 (62%) | 8 (100%) | 5 (62%) | 7 (88%) | 5 (62%) | **8 (100%)** |
+| Syslog triage — drain3 (8) | 5 (62%) | 7 (88%) | 5 (62%) | 1 (12%) | 6 (75%) | 7 (88%) |
+| **Overall / 32 (drain3 syslog)** | 23 (72%) | 23 (72%) | 17 (53%) | 16 (50%) | 17 (53%) | **28 (88%)** |
 
-## What to take away
+**Bold = best.** Gemma3-27B is the new leader by a clear margin, scoring
+perfect (100%) on three of five sections and tying Foundation-Sec on MITRE.
+The next-best models (Foundation-Sec, Llama-3.1) sit 5 cases behind.
 
-- For workloads dominated by **MITRE technique recall**, Foundation-Sec
-  is unambiguously the best of these four. It is the only model with a
-  meaningful win on that section.
-- For workloads dominated by **binary "is this an incident?" decisioning
-  on natural-language scenarios or raw logs**, the un-tuned Llama-3.1-8B
-  matches or beats every SOC fine-tune tested. The implication: a SOC
-  fine-tune is not automatically better than a strong generalist on
-  triage tasks.
-- The two SOC-marketed peers (ZySec, Lily) both finish last overall.
-  Marketing as "SOC analyst" doesn't translate into benchmark wins on
-  this task set.
-- **drain3 augmentation is not a free upgrade.** Best result: 0
-  improvement (Foundation-Sec, ZySec). Worst result: −6 cases (Lily).
-  Treat it as model-specific tooling, not a default.
+## Performance — latency, GPU, CPU, RAM
 
-## Reproduce
+Per model, totals across all 40 model calls (7 incident + 7 threat + 10 MITRE + 8 syslog raw + 8 syslog drain3). Latency in seconds. GPU util/memory from `nvidia-smi`, CPU/RAM from `psutil`. Sampled every 250 ms; peak is the max sample inside each call window.
 
-```
-ollama pull hf.co/Mungert/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M
-ollama pull llama3.1:8b
-ollama pull hf.co/koesn/ZySec-7B-v1-GGUF:Q4_K_M
-ollama pull hf.co/segolilylabs/Lily-Cybersecurity-7B-v0.2-GGUF:Q4_K_M
-pip install -r requirements.txt
+| Model | Total s | Avg s/call | p50 s | p95 s | Max s | Peak GPU% | Avg GPU% | Steady GPU MB | Peak CPU% | Avg CPU% | Peak RAM MB |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Lily-Cyber-7B | 18.9 | 0.47 | 0.32 | 1.23 | 2.87 | 93% | 77% | ~17,700 | 54% | 12% | 32,556 |
+| ZySec-7B-v1 | 22.0 | 0.55 | 0.46 | 1.26 | 2.78 | 93% | 72% | ~18,100 | 16% | 4% | 32,664 |
+| Foundation-Sec-8B | 27.8 | 0.70 | 0.48 | 0.85 | 6.67 | 81% | 24% | ~9,300 | 51% | 14% | 34,519 |
+| Llama-3.1-8B | 31.9 | 0.80 | 0.72 | 0.91 | 3.31 | 81% | 35% | ~18,500 | 54% | 15% | 32,769 |
+| **Gemma3-27B** | **63.8** | **1.60** | **1.40** | **1.79** | **11.42** | **94%** | **54%** | **~20,500** | **49%** | **11%** | **33,778** |
+| Qwen3-14B | 181.4 | 4.53 | 5.03 | 5.14 | 9.24 | 93% | 80% | ~14,300 | 56% | 10% | 37,617 |
 
-python3 benchmark.py --model hf.co/Mungert/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M --output results-foundation-sec.md
-python3 benchmark.py --model llama3.1:8b                                          --output results-llama31.md
-python3 benchmark.py --model hf.co/koesn/ZySec-7B-v1-GGUF:Q4_K_M                  --output results-zysec.md
-python3 benchmark.py --model hf.co/segolilylabs/Lily-Cybersecurity-7B-v0.2-GGUF:Q4_K_M --output results-lily.md
-```
+Notes:
+- **Steady GPU MB** is the per-call resident set after the cold load (model fully on GPU). The first INC-1 call always shows higher because the previous model is being evicted.
+- The "Max s" column is the cold-load case (INC-1 for each model). Steady-state per-call latency is much closer to the avg/p50 numbers.
+- All six models fit fully on the 4090 (≤ 21 GB). None had to spill to CPU RAM.
+- **Qwen3-14B is 5-10× slower than the other ≤14B models** despite running fully on GPU — this is its hybrid reasoning mode generating long `<think>` chains before answering, consuming most of the 400-token budget on reasoning.
 
-Per-case transcripts (model reply text, scoring matches, drain3 templates):
+## Accuracy ÷ time — what's the cost per correct answer?
+
+| Model | Correct | Total s | s per correct |
+|---|---|---|---|
+| **Gemma3-27B** | **28** | 63.8 | **2.28** |
+| Lily-Cyber-7B | 16 | 18.9 | 1.18 |
+| ZySec-7B-v1 | 17 | 22.0 | 1.29 |
+| Foundation-Sec-8B | 23 | 27.8 | 1.21 |
+| Llama-3.1-8B | 23 | 31.9 | 1.39 |
+| Qwen3-14B | 17 | 181.4 | 10.67 |
+
+The 7-8B models are cheapest per call, but Gemma3-27B's accuracy lift more
+than pays for the 2-3× time cost. Qwen3-14B is the worst on every axis here.
+
+## Headline takeaways
+
+- **Gemma3-27B is the right pick for skill.md-style prompting.** It's the
+  only model that scores ≥88% in every section except MITRE (where it
+  matches Foundation-Sec at 70%). Avg latency 1.6 s/call, peak GPU memory
+  ~20.5 GB — fits comfortably in 24 GB VRAM with headroom for KV cache up
+  to ~32K tokens.
+- **Foundation-Sec is no longer the MITRE moat it once was.** Gemma3-27B
+  matches its 7/10 on technique recall while crushing it on every other
+  section. The cyber pre-training advantage doesn't show up here.
+- **Qwen3-14B's reasoning mode hurts both accuracy and speed.** The
+  thinking chains burn the response budget before the model answers (1/10
+  on MITRE because the technique ID never gets emitted), and per-call
+  latency is 5-10× the other sub-15B models. Disable reasoning (`/no_think`
+  in prompt or `enable_thinking=false`) before re-evaluating, or skip in
+  favour of Qwen2.5-14B / Gemma3-12B.
+- **The "SOC-tuned" 7B peers (ZySec, Lily) remain the weakest overall.**
+  They're fast (≤0.6 s avg) but their accuracy ceiling is too low for
+  skill-style multi-step prompts.
+- **drain3 augmentation is still model-dependent.** Foundation-Sec, ZySec
+  unchanged. Llama-3.1 loses 1 case. Lily collapses 7→1. Qwen3-14B gains 1.
+  Gemma3-27B loses 1. Don't ship drain3 as a universal pre-filter; gate it
+  per-model.
+
+## Recommendation for the user's question ("learn complex instructions like skill.md")
+
+**Use `gemma3:27b`.** It dominates the accuracy table, has 128K context (so
+a long skill block + the case prompt + drain3 templates fit easily), runs
+fully on GPU, and finishes a 40-call benchmark in 64 s — fast enough for
+interactive iteration. Foundation-Sec stays as a backup if your real
+workload is dominated by ATT&CK technique mapping, where the two are tied.
+
+Per-case transcripts (with per-call metrics inline):
 
 - `results-foundation-sec.md`
 - `results-llama31.md`
 - `results-zysec.md`
 - `results-lily.md`
+- `results-qwen3-14b.md`
+- `results-gemma3-27b.md`

@@ -14,10 +14,13 @@ response, and score it. Final report is written to results.md.
 import argparse
 import json
 import re
+import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
+import psutil
 from drain3 import TemplateMiner
 from drain3.template_miner_config import TemplateMinerConfig
 
@@ -279,9 +282,80 @@ SYSLOG_CASES = [
 ]
 
 
+# ---------- Resource sampling ----------
+
+class MetricsSampler:
+    """Background sampler for GPU/CPU/RAM during a model call.
+
+    Polls nvidia-smi (GPU util + GPU mem MB) and psutil (system CPU% + RSS MB)
+    every `interval`. start()/stop() returns aggregated peak/avg metrics for
+    the window between the two calls.
+    """
+
+    def __init__(self, interval: float = 0.25):
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._samples: list[tuple[float, float, float, float]] = []  # (gpu%, gpu_mb, cpu%, ram_mb)
+
+    @staticmethod
+    def _read_gpu() -> tuple[float, float]:
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used",
+                 "--format=csv,noheader,nounits"],
+                stderr=subprocess.DEVNULL, timeout=2,
+            ).decode().strip().splitlines()[0]
+            util, mem = [p.strip() for p in out.split(",")]
+            return float(util), float(mem)
+        except Exception:
+            return 0.0, 0.0
+
+    def _loop(self) -> None:
+        # Prime psutil cpu_percent so it returns deltas, not zero.
+        psutil.cpu_percent(interval=None)
+        while not self._stop.is_set():
+            gpu_util, gpu_mb = self._read_gpu()
+            cpu = psutil.cpu_percent(interval=None)
+            ram_mb = psutil.virtual_memory().used / (1024 * 1024)
+            self._samples.append((gpu_util, gpu_mb, cpu, ram_mb))
+            self._stop.wait(self.interval)
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._samples = []
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> dict:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        if not self._samples:
+            return {"peak_gpu_util": 0.0, "avg_gpu_util": 0.0, "peak_gpu_mb": 0.0,
+                    "peak_cpu": 0.0, "avg_cpu": 0.0, "peak_ram_mb": 0.0, "n": 0}
+        gpu_u = [s[0] for s in self._samples]
+        gpu_m = [s[1] for s in self._samples]
+        cpu_v = [s[2] for s in self._samples]
+        ram_v = [s[3] for s in self._samples]
+        return {
+            "peak_gpu_util": max(gpu_u),
+            "avg_gpu_util": sum(gpu_u) / len(gpu_u),
+            "peak_gpu_mb": max(gpu_m),
+            "peak_cpu": max(cpu_v),
+            "avg_cpu": sum(cpu_v) / len(cpu_v),
+            "peak_ram_mb": max(ram_v),
+            "n": len(self._samples),
+        }
+
+
+SAMPLER = MetricsSampler()
+
+
 # ---------- Ollama call ----------
 
-def ask(prompt: str, system: str = "", timeout: int = 180) -> str:
+def ask(prompt: str, system: str = "", timeout: int = 180) -> tuple[str, float, dict]:
+    """Send a prompt to Ollama, returning (reply, latency_seconds, metrics)."""
     body = json.dumps({
         "model": MODEL,
         "prompt": prompt,
@@ -290,8 +364,15 @@ def ask(prompt: str, system: str = "", timeout: int = 180) -> str:
         "options": {"temperature": 0.0, "num_predict": 400},
     }).encode()
     req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read())["response"].strip()
+    SAMPLER.start()
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            reply = json.loads(r.read())["response"].strip()
+    finally:
+        latency = time.time() - t0
+        metrics = SAMPLER.stop()
+    return reply, latency, metrics
 
 
 # ---------- Scoring ----------
@@ -402,6 +483,24 @@ def main(argv: list[str] | None = None) -> int:
 
     sys_prompt = "You are a cybersecurity analyst. Answer concisely and decisively."
 
+    # Per-section metrics: list of dicts {id, latency, peak_gpu_util, ...}.
+    section_metrics: dict[str, list[dict]] = {
+        "incident": [], "threat": [], "mitre": [],
+        "syslog_raw": [], "syslog_drain3": [],
+    }
+
+    def call(prompt: str) -> tuple[str, float, dict]:
+        try:
+            return ask(prompt, sys_prompt)
+        except Exception as e:
+            return f"ERROR: {e}", 0.0, {"peak_gpu_util": 0.0, "avg_gpu_util": 0.0,
+                                         "peak_gpu_mb": 0.0, "peak_cpu": 0.0,
+                                         "avg_cpu": 0.0, "peak_ram_mb": 0.0, "n": 0}
+
+    def fmt_metrics(m: dict) -> str:
+        return (f"GPU {m['peak_gpu_util']:.0f}%/{m['peak_gpu_mb']:.0f}MB · "
+                f"CPU {m['peak_cpu']:.0f}% · RAM {m['peak_ram_mb']:.0f}MB")
+
     # 1. Incident recognition
     out_lines.append("\n## 1. Incident recognition (binary)\n")
     inc_correct = 0
@@ -411,16 +510,12 @@ def main(argv: list[str] | None = None) -> int:
             "Question: Is this a security incident or benign activity? "
             "Reply with one word first ('Incident' or 'Benign'), then one sentence of justification."
         )
-        t0 = time.time()
-        try:
-            reply = ask(prompt, sys_prompt)
-        except Exception as e:
-            reply = f"ERROR: {e}"
-        dt = time.time() - t0
+        reply, dt, metrics = call(prompt)
         ok = score_incident(reply, c["expected"])
         inc_correct += int(ok)
+        section_metrics["incident"].append({"id": c["id"], "latency": dt, **metrics})
         out_lines.append(
-            f"\n### {c['id']} — expected: **{c['expected']}** — {'PASS' if ok else 'FAIL'} ({dt:.1f}s)\n"
+            f"\n### {c['id']} — expected: **{c['expected']}** — {'PASS' if ok else 'FAIL'} ({dt:.1f}s · {fmt_metrics(metrics)})\n"
             f"_Scenario_: {c['scenario']}\n\n"
             f"_Reply_: {reply}\n"
         )
@@ -434,16 +529,12 @@ def main(argv: list[str] | None = None) -> int:
             f"Scenario:\n{c['scenario']}\n\n"
             "Question: Name the specific threat or attack type in 1-3 words, then briefly explain."
         )
-        t0 = time.time()
-        try:
-            reply = ask(prompt, sys_prompt)
-        except Exception as e:
-            reply = f"ERROR: {e}"
-        dt = time.time() - t0
+        reply, dt, metrics = call(prompt)
         ok, hit = score_threat(reply, c["expected_keywords"])
         thr_correct += int(ok)
+        section_metrics["threat"].append({"id": c["id"], "latency": dt, **metrics})
         out_lines.append(
-            f"\n### {c['id']} — accepted keywords: {c['expected_keywords']} — {'PASS' if ok else 'FAIL'} ({dt:.1f}s)\n"
+            f"\n### {c['id']} — accepted keywords: {c['expected_keywords']} — {'PASS' if ok else 'FAIL'} ({dt:.1f}s · {fmt_metrics(metrics)})\n"
             f"_Scenario_: {c['scenario']}\n\n"
             f"_Reply_: {reply}\n"
             + (f"\n_Match_: '{hit}'\n" if ok else "")
@@ -461,14 +552,10 @@ def main(argv: list[str] | None = None) -> int:
             "Question: Which MITRE ATT&CK technique best matches this behavior? "
             "Reply with the technique ID (e.g. T1059.001) and the technique name."
         )
-        t0 = time.time()
-        try:
-            reply = ask(prompt, sys_prompt)
-        except Exception as e:
-            reply = f"ERROR: {e}"
-        dt = time.time() - t0
+        reply, dt, metrics = call(prompt)
         ok, hit = score_mitre(reply, c["expected_ids"])
         att_correct += int(ok)
+        section_metrics["mitre"].append({"id": c["id"], "latency": dt, **metrics})
 
         # Short-form scenario for the summary table.
         short = c["scenario"] if len(c["scenario"]) <= 70 else c["scenario"][:67] + "..."
@@ -480,7 +567,7 @@ def main(argv: list[str] | None = None) -> int:
             f"| `{detected}` | {'PASS' if ok else 'FAIL'} |"
         )
         mitre_details.append(
-            f"\n### {c['id']} — accepted IDs: {c['expected_ids']} — {'PASS' if ok else 'FAIL'} ({dt:.1f}s)\n"
+            f"\n### {c['id']} — accepted IDs: {c['expected_ids']} — {'PASS' if ok else 'FAIL'} ({dt:.1f}s · {fmt_metrics(metrics)})\n"
             f"_Scenario_: {c['scenario']}\n\n"
             f"_Reply_: {reply}\n"
             f"\n_Detected IDs_: {hit}\n"
@@ -509,14 +596,10 @@ def main(argv: list[str] | None = None) -> int:
             "Question: Is this a security incident or benign activity? "
             "Reply with one word first ('Incident' or 'Benign'), then one sentence of justification."
         )
-        t0 = time.time()
-        try:
-            raw_reply = ask(raw_prompt, sys_prompt)
-        except Exception as e:
-            raw_reply = f"ERROR: {e}"
-        dt_raw = time.time() - t0
+        raw_reply, dt_raw, m_raw = call(raw_prompt)
         ok_raw = score_incident(raw_reply, c["expected"])
         sys_raw_correct += int(ok_raw)
+        section_metrics["syslog_raw"].append({"id": c["id"], "latency": dt_raw, **m_raw})
 
         # 4b. drain3-augmented: same logs + clustered template summary, with
         # explicit guidance on how to weight cluster counts.
@@ -538,22 +621,18 @@ def main(argv: list[str] | None = None) -> int:
             "as your primary signal. Reply with one word first ('Incident' or 'Benign'), then "
             "one sentence of justification that references the template counts."
         )
-        t0 = time.time()
-        try:
-            aug_reply = ask(aug_prompt, sys_prompt)
-        except Exception as e:
-            aug_reply = f"ERROR: {e}"
-        dt_aug = time.time() - t0
+        aug_reply, dt_aug, m_aug = call(aug_prompt)
         ok_aug = score_incident(aug_reply, c["expected"])
         sys_drain_correct += int(ok_aug)
+        section_metrics["syslog_drain3"].append({"id": c["id"], "latency": dt_aug, **m_aug})
 
         out_lines.append(
             f"\n### {c['id']} — {c['label']} — expected: **{c['expected']}**\n"
             f"_Logs_:\n```\n{c['log']}```\n\n"
             f"_drain3 templates_:\n```\n{templates}\n```\n\n"
-            f"**Baseline (raw only)** — {'PASS' if ok_raw else 'FAIL'} ({dt_raw:.1f}s)\n"
+            f"**Baseline (raw only)** — {'PASS' if ok_raw else 'FAIL'} ({dt_raw:.1f}s · {fmt_metrics(m_raw)})\n"
             f"_Reply_: {raw_reply}\n\n"
-            f"**With drain3 summary** — {'PASS' if ok_aug else 'FAIL'} ({dt_aug:.1f}s)\n"
+            f"**With drain3 summary** — {'PASS' if ok_aug else 'FAIL'} ({dt_aug:.1f}s · {fmt_metrics(m_aug)})\n"
             f"_Reply_: {aug_reply}\n"
         )
         print(f"  {c['id']}: raw={'PASS' if ok_raw else 'FAIL'} drain3={'PASS' if ok_aug else 'FAIL'} ({dt_raw:.1f}s / {dt_aug:.1f}s)")
@@ -573,8 +652,64 @@ def main(argv: list[str] | None = None) -> int:
         f"| Syslog triage (drain3) | {sys_drain_correct} | {n_sys} | {sys_drain_correct/n_sys:.0%} |\n"
         f"| **Overall (with drain3)** | **{correct}** | **{total}** | **{correct/total:.0%}** |\n"
     )
-    out_lines.insert(3, summary)
+
+    # Per-section resource summary: latency stats + peak GPU/CPU/RAM during inference.
+    def agg(rows: list[dict]) -> dict:
+        if not rows:
+            return {}
+        lats = sorted(r["latency"] for r in rows)
+        return {
+            "n": len(rows),
+            "total_s": sum(lats),
+            "avg_s": sum(lats) / len(lats),
+            "p50_s": lats[len(lats) // 2],
+            "p95_s": lats[max(0, int(len(lats) * 0.95) - 1)],
+            "max_s": max(lats),
+            "peak_gpu_util": max(r["peak_gpu_util"] for r in rows),
+            "avg_gpu_util": sum(r["avg_gpu_util"] for r in rows) / len(rows),
+            "peak_gpu_mb": max(r["peak_gpu_mb"] for r in rows),
+            "peak_cpu": max(r["peak_cpu"] for r in rows),
+            "avg_cpu": sum(r["avg_cpu"] for r in rows) / len(rows),
+            "peak_ram_mb": max(r["peak_ram_mb"] for r in rows),
+        }
+
+    perf_rows = []
+    for label, key in [
+        ("Incident", "incident"), ("Threat", "threat"), ("MITRE", "mitre"),
+        ("Syslog (raw)", "syslog_raw"), ("Syslog (drain3)", "syslog_drain3"),
+    ]:
+        a = agg(section_metrics[key])
+        if not a:
+            continue
+        perf_rows.append(
+            f"| {label} | {a['n']} | {a['total_s']:.1f} | {a['avg_s']:.2f} | "
+            f"{a['p50_s']:.2f} | {a['p95_s']:.2f} | {a['max_s']:.2f} | "
+            f"{a['peak_gpu_util']:.0f}% | {a['avg_gpu_util']:.0f}% | "
+            f"{a['peak_gpu_mb']:.0f} | {a['peak_cpu']:.0f}% | "
+            f"{a['avg_cpu']:.0f}% | {a['peak_ram_mb']:.0f} |"
+        )
+
+    all_rows = sum(section_metrics.values(), [])
+    overall = agg(all_rows)
+    perf_summary = (
+        "\n## Resource usage\n\n"
+        "Latency in seconds. GPU util/memory from `nvidia-smi`, CPU/RAM from `psutil`. "
+        "Sampled every 250ms during each model call; peak is the max sample within the window.\n\n"
+        "| Section | n | Total s | Avg s | p50 s | p95 s | Max s | Peak GPU% | Avg GPU% | Peak GPU MB | Peak CPU% | Avg CPU% | Peak RAM MB |\n"
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
+        + "\n".join(perf_rows) + "\n"
+        + (f"| **Overall** | **{overall['n']}** | **{overall['total_s']:.1f}** | "
+           f"**{overall['avg_s']:.2f}** | **{overall['p50_s']:.2f}** | "
+           f"**{overall['p95_s']:.2f}** | **{overall['max_s']:.2f}** | "
+           f"**{overall['peak_gpu_util']:.0f}%** | **{overall['avg_gpu_util']:.0f}%** | "
+           f"**{overall['peak_gpu_mb']:.0f}** | **{overall['peak_cpu']:.0f}%** | "
+           f"**{overall['avg_cpu']:.0f}%** | **{overall['peak_ram_mb']:.0f}** |\n"
+           if overall else "")
+    )
+
+    out_lines.insert(3, summary + perf_summary)
     print(summary)
+    print(perf_summary)
 
     with open(args.output, "w") as f:
         f.write("".join(out_lines))
