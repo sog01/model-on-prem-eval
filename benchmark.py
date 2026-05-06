@@ -1,22 +1,52 @@
 """
 Foundation-Sec-8B-Instruct accuracy test.
 
-Three sections:
+Four sections:
   1. Incident recognition (binary: incident vs benign)
   2. Threat-type classification (multi-class)
   3. MITRE ATT&CK technique mapping (technique ID + name)
+  4. Raw syslog triage (binary on real log-line snippets)
 
 Each case has a known answer. We send the prompt to Ollama, parse the
 response, and score it. Final report is written to results.md.
 """
 
+import argparse
 import json
 import re
+import sys
 import time
 import urllib.request
 
+from drain3 import TemplateMiner
+from drain3.template_miner_config import TemplateMinerConfig
+
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "hf.co/Mungert/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
+DEFAULT_MODEL = "hf.co/Mungert/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+
+# Set by main() from --model. The ask() helper reads this at call time so the
+# whole benchmark uses one consistent model without threading it through every
+# function.
+MODEL = DEFAULT_MODEL
+
+
+def drain3_summary(log: str) -> str:
+    """Cluster log lines into templates and return a `[xN] template` summary.
+
+    Each snippet is mined in isolation so cluster counts reflect only that
+    snippet — the model sees how many times each pattern repeats, which is
+    the primary signal for brute-force / probe-style activity.
+    """
+    config = TemplateMinerConfig()
+    config.profiling_enabled = False
+    miner = TemplateMiner(config=config)
+    for line in log.splitlines():
+        line = line.strip()
+        if line:
+            miner.add_log_message(line)
+    clusters = sorted(miner.drain.clusters, key=lambda c: -c.size)
+    return "\n".join(f"[x{c.size}] {c.get_template()}" for c in clusters)
 
 # ---------- Test cases ----------
 
@@ -151,6 +181,104 @@ MITRE_CASES = [
 ]
 
 
+# Real-format syslog snippets (sshd, sudo, CRON, Apache access, winlogbeat).
+# Each snippet is a verbatim multi-line excerpt as it would appear on disk.
+SYSLOG_CASES = [
+    {
+        "id": "SYS-1",
+        "label": "SSH brute force followed by successful login",
+        "log": (
+            "Mar 10 03:41:02 webhost sshd[28401]: Failed password for invalid user admin from 185.220.101.45 port 47812 ssh2\n"
+            "Mar 10 03:41:05 webhost sshd[28403]: Failed password for invalid user root from 185.220.101.45 port 47815 ssh2\n"
+            "Mar 10 03:41:08 webhost sshd[28405]: Failed password for invalid user oracle from 185.220.101.45 port 47820 ssh2\n"
+            "Mar 10 03:41:11 webhost sshd[28407]: Failed password for invalid user postgres from 185.220.101.45 port 47824 ssh2\n"
+            "Mar 10 03:41:14 webhost sshd[28409]: Failed password for invalid user git from 185.220.101.45 port 47829 ssh2\n"
+            "Mar 10 03:41:17 webhost sshd[28411]: Failed password for invalid user test from 185.220.101.45 port 47833 ssh2\n"
+            "Mar 10 03:41:20 webhost sshd[28413]: Failed password for ubuntu from 185.220.101.45 port 47837 ssh2\n"
+            "Mar 10 03:43:21 webhost sshd[28571]: Accepted password for ubuntu from 185.220.101.45 port 47891 ssh2\n"
+            "Mar 10 03:43:21 webhost sshd[28571]: pam_unix(sshd:session): session opened for user ubuntu by (uid=0)\n"
+        ),
+        "expected": "incident",
+    },
+    {
+        "id": "SYS-2",
+        "label": "Normal pubkey login from internal range",
+        "log": (
+            "Mar 10 09:14:32 webhost sshd[14201]: Accepted publickey for alice from 10.0.4.22 port 51842 ssh2: RSA SHA256:7Hk2pQ...\n"
+            "Mar 10 09:14:32 webhost sshd[14201]: pam_unix(sshd:session): session opened for user alice by (uid=0)\n"
+            "Mar 10 09:14:33 webhost systemd-logind[612]: New session 2841 of user alice.\n"
+        ),
+        "expected": "benign",
+    },
+    {
+        "id": "SYS-3",
+        "label": "Daily cron run",
+        "log": (
+            "Mar 10 02:00:01 webhost CRON[31201]: (root) CMD (test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.daily ))\n"
+            "Mar 10 02:00:23 webhost rsyslogd: [origin software=\"rsyslogd\" swVersion=\"8.2102.0\"] rsyslogd was HUPed\n"
+            "Mar 10 02:00:24 webhost CRON[31201]: pam_unix(cron:session): session closed for user root\n"
+        ),
+        "expected": "benign",
+    },
+    {
+        "id": "SYS-4",
+        "label": "SQL injection probes in Apache access log",
+        "log": (
+            "185.62.190.13 - - [10/Mar/2026:14:22:03 +0000] \"GET /products.php?id=1' OR '1'='1-- HTTP/1.1\" 500 1842\n"
+            "185.62.190.13 - - [10/Mar/2026:14:22:04 +0000] \"GET /products.php?id=1+UNION+SELECT+username,password+FROM+users-- HTTP/1.1\" 200 4129\n"
+            "185.62.190.13 - - [10/Mar/2026:14:22:05 +0000] \"GET /products.php?id=1;DROP+TABLE+users-- HTTP/1.1\" 500 1842\n"
+            "185.62.190.13 - - [10/Mar/2026:14:22:06 +0000] \"GET /products.php?id=1+AND+SLEEP(5)-- HTTP/1.1\" 200 4129\n"
+        ),
+        "expected": "incident",
+    },
+    {
+        "id": "SYS-5",
+        "label": "Sudo adding service account to sudo group at 03:17",
+        "log": (
+            "Mar 10 03:17:42 webhost sudo:      bob : TTY=pts/3 ; PWD=/home/bob ; USER=root ; COMMAND=/usr/sbin/usermod -aG sudo svc_backup\n"
+            "Mar 10 03:17:42 webhost sudo: pam_unix(sudo:session): session opened for user root by bob(uid=0)\n"
+            "Mar 10 03:17:43 webhost usermod[18293]: add 'svc_backup' to group 'sudo'\n"
+            "Mar 10 03:17:43 webhost usermod[18293]: add 'svc_backup' to shadow group 'sudo'\n"
+            "Mar 10 03:17:43 webhost sudo: pam_unix(sudo:session): session closed for user root\n"
+        ),
+        "expected": "incident",
+    },
+    {
+        "id": "SYS-6",
+        "label": "Path traversal probes in Apache access log",
+        "log": (
+            "198.51.100.7 - - [10/Mar/2026:11:03:18 +0000] \"GET /download?file=../../../../etc/passwd HTTP/1.1\" 200 2841\n"
+            "198.51.100.7 - - [10/Mar/2026:11:03:19 +0000] \"GET /download?file=..%2F..%2F..%2Fetc%2Fshadow HTTP/1.1\" 403 891\n"
+            "198.51.100.7 - - [10/Mar/2026:11:03:20 +0000] \"GET /download?file=....//....//etc/hosts HTTP/1.1\" 200 412\n"
+        ),
+        "expected": "incident",
+    },
+    {
+        "id": "SYS-7",
+        "label": "Normal authenticated web session",
+        "log": (
+            "10.0.4.22 - alice [10/Mar/2026:10:14:02 +0000] \"GET /dashboard HTTP/1.1\" 200 18421 \"https://intranet.example.com/\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36\"\n"
+            "10.0.4.22 - alice [10/Mar/2026:10:14:03 +0000] \"GET /static/app.js HTTP/1.1\" 200 84219 \"https://intranet.example.com/dashboard\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36\"\n"
+            "10.0.4.22 - alice [10/Mar/2026:10:14:03 +0000] \"POST /api/v1/metrics HTTP/1.1\" 200 142 \"https://intranet.example.com/dashboard\" \"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36\"\n"
+        ),
+        "expected": "benign",
+    },
+    {
+        "id": "SYS-8",
+        "label": "Windows 4625 burst then 4624 from same IP",
+        "log": (
+            "Mar 10 02:18:14 dc01 winlogbeat: EventID=4625 Account=Administrator LogonType=3 FailureReason=BadPassword IpAddress=192.168.50.13 WorkstationName=KIOSK-04\n"
+            "Mar 10 02:18:16 dc01 winlogbeat: EventID=4625 Account=Administrator LogonType=3 FailureReason=BadPassword IpAddress=192.168.50.13 WorkstationName=KIOSK-04\n"
+            "Mar 10 02:18:18 dc01 winlogbeat: EventID=4625 Account=Administrator LogonType=3 FailureReason=BadPassword IpAddress=192.168.50.13 WorkstationName=KIOSK-04\n"
+            "Mar 10 02:18:21 dc01 winlogbeat: EventID=4625 Account=Administrator LogonType=3 FailureReason=BadPassword IpAddress=192.168.50.13 WorkstationName=KIOSK-04\n"
+            "Mar 10 02:18:24 dc01 winlogbeat: EventID=4625 Account=Administrator LogonType=3 FailureReason=BadPassword IpAddress=192.168.50.13 WorkstationName=KIOSK-04\n"
+            "Mar 10 02:21:42 dc01 winlogbeat: EventID=4624 Account=Administrator LogonType=3 IpAddress=192.168.50.13 WorkstationName=KIOSK-04\n"
+        ),
+        "expected": "incident",
+    },
+]
+
+
 # ---------- Ollama call ----------
 
 def ask(prompt: str, system: str = "", timeout: int = 180) -> str:
@@ -202,8 +330,73 @@ def score_mitre(reply: str, expected_ids: list[str]) -> tuple[bool, str]:
 
 # ---------- Run ----------
 
-def main():
-    out_lines = ["# Foundation-Sec-8B-Instruct evaluation\n"]
+def list_installed_models() -> list[str]:
+    """Return the list of model names currently pulled into the local Ollama."""
+    with urllib.request.urlopen(OLLAMA_TAGS_URL, timeout=10) as r:
+        data = json.loads(r.read())
+    return [m["name"] for m in data.get("models", [])]
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Run the cybersecurity accuracy benchmark against an Ollama model.",
+    )
+    p.add_argument(
+        "--model", "-m",
+        default=DEFAULT_MODEL,
+        help=f"Ollama model name to test (default: {DEFAULT_MODEL})",
+    )
+    p.add_argument(
+        "--output", "-o",
+        default="results.md",
+        help="Output markdown file (default: results.md)",
+    )
+    p.add_argument(
+        "--list", "-l",
+        action="store_true",
+        help="List installed Ollama models and exit.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    global MODEL
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+
+    if args.list:
+        try:
+            models = list_installed_models()
+        except Exception as e:
+            print(f"ERROR: could not reach Ollama at {OLLAMA_TAGS_URL}: {e}")
+            return 1
+        if not models:
+            print("(no models installed — run `ollama pull <name>`)")
+        else:
+            print("Installed Ollama models:")
+            for m in models:
+                marker = " (default)" if m == DEFAULT_MODEL else ""
+                print(f"  - {m}{marker}")
+        return 0
+
+    MODEL = args.model
+
+    # Verify the chosen model is actually pulled, so failures fail fast with a
+    # useful message instead of timing out per-case.
+    try:
+        installed = list_installed_models()
+    except Exception as e:
+        print(f"ERROR: could not reach Ollama at {OLLAMA_TAGS_URL}: {e}")
+        return 1
+    if MODEL not in installed:
+        print(f"ERROR: model '{MODEL}' is not installed in Ollama.")
+        print(f"Installed: {installed or '(none)'}")
+        print(f"Pull it with: ollama pull {MODEL}")
+        return 1
+
+    print(f"Model:  {MODEL}")
+    print(f"Output: {args.output}\n")
+
+    out_lines = [f"# Cybersecurity benchmark — `{MODEL}`\n"]
     out_lines.append(f"Model: `{MODEL}`\n")
     out_lines.append(f"Run started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
@@ -260,6 +453,8 @@ def main():
     # 3. MITRE mapping
     out_lines.append(f"\n## 3. MITRE ATT&CK technique mapping\n")
     att_correct = 0
+    mitre_rows = []  # for the per-case summary table
+    mitre_details = []
     for c in MITRE_CASES:
         prompt = (
             f"Scenario:\n{c['scenario']}\n\n"
@@ -274,7 +469,17 @@ def main():
         dt = time.time() - t0
         ok, hit = score_mitre(reply, c["expected_ids"])
         att_correct += int(ok)
-        out_lines.append(
+
+        # Short-form scenario for the summary table.
+        short = c["scenario"] if len(c["scenario"]) <= 70 else c["scenario"][:67] + "..."
+        # Escape pipes so markdown tables don't break.
+        short = short.replace("|", "\\|")
+        detected = hit.replace("|", "\\|") if hit else "(none)"
+        mitre_rows.append(
+            f"| {c['id']} | {short} | `{', '.join(c['expected_ids'])}` "
+            f"| `{detected}` | {'PASS' if ok else 'FAIL'} |"
+        )
+        mitre_details.append(
             f"\n### {c['id']} — accepted IDs: {c['expected_ids']} — {'PASS' if ok else 'FAIL'} ({dt:.1f}s)\n"
             f"_Scenario_: {c['scenario']}\n\n"
             f"_Reply_: {reply}\n"
@@ -282,9 +487,81 @@ def main():
         )
         print(f"  {c['id']}: {'PASS' if ok else 'FAIL'} ({dt:.1f}s)")
 
-    # Summary
-    total = len(INCIDENT_CASES) + len(THREAT_CASES) + len(MITRE_CASES)
-    correct = inc_correct + thr_correct + att_correct
+    out_lines.append(
+        "\n**Per-case results**\n\n"
+        "| Case | Scenario | Accepted IDs | Detected | Result |\n"
+        "|---|---|---|---|---|\n"
+        + "\n".join(mitre_rows)
+        + "\n"
+    )
+    out_lines.extend(mitre_details)
+
+    # 4. Raw syslog triage — A/B: raw vs drain3-augmented prompt
+    out_lines.append(f"\n## 4. Raw syslog triage (binary) — baseline vs drain3-augmented\n")
+    sys_raw_correct = 0
+    sys_drain_correct = 0
+    for c in SYSLOG_CASES:
+        # 4a. Baseline: raw logs only
+        raw_prompt = (
+            "You are reviewing raw log lines from a SIEM. Treat the text below as verbatim log output.\n\n"
+            "Logs:\n"
+            f"{c['log']}\n"
+            "Question: Is this a security incident or benign activity? "
+            "Reply with one word first ('Incident' or 'Benign'), then one sentence of justification."
+        )
+        t0 = time.time()
+        try:
+            raw_reply = ask(raw_prompt, sys_prompt)
+        except Exception as e:
+            raw_reply = f"ERROR: {e}"
+        dt_raw = time.time() - t0
+        ok_raw = score_incident(raw_reply, c["expected"])
+        sys_raw_correct += int(ok_raw)
+
+        # 4b. drain3-augmented: same logs + clustered template summary, with
+        # explicit guidance on how to weight cluster counts.
+        templates = drain3_summary(c["log"])
+        aug_prompt = (
+            "You are reviewing raw log lines from a SIEM. Treat the text below as verbatim log output.\n\n"
+            "Logs:\n"
+            f"{c['log']}\n"
+            "Pattern summary from drain3 log clustering (one line per template, [xN] is the "
+            "number of matching log lines, <*> marks variable fields):\n"
+            f"{templates}\n\n"
+            "How to read the pattern summary:\n"
+            "- A high [xN] count on an attack-shaped template (e.g. failed logins, SQL/path-"
+            "traversal probes, repeated auth failures) is strong evidence of an incident.\n"
+            "- A small number of distinct templates with low counts that match routine activity "
+            "(scheduled jobs, normal pubkey logins, ordinary HTTP 200s from internal users) is "
+            "evidence of benign activity. Do NOT flag routine maintenance as an incident.\n\n"
+            "Question: Is this a security incident or benign activity? Use the pattern summary "
+            "as your primary signal. Reply with one word first ('Incident' or 'Benign'), then "
+            "one sentence of justification that references the template counts."
+        )
+        t0 = time.time()
+        try:
+            aug_reply = ask(aug_prompt, sys_prompt)
+        except Exception as e:
+            aug_reply = f"ERROR: {e}"
+        dt_aug = time.time() - t0
+        ok_aug = score_incident(aug_reply, c["expected"])
+        sys_drain_correct += int(ok_aug)
+
+        out_lines.append(
+            f"\n### {c['id']} — {c['label']} — expected: **{c['expected']}**\n"
+            f"_Logs_:\n```\n{c['log']}```\n\n"
+            f"_drain3 templates_:\n```\n{templates}\n```\n\n"
+            f"**Baseline (raw only)** — {'PASS' if ok_raw else 'FAIL'} ({dt_raw:.1f}s)\n"
+            f"_Reply_: {raw_reply}\n\n"
+            f"**With drain3 summary** — {'PASS' if ok_aug else 'FAIL'} ({dt_aug:.1f}s)\n"
+            f"_Reply_: {aug_reply}\n"
+        )
+        print(f"  {c['id']}: raw={'PASS' if ok_raw else 'FAIL'} drain3={'PASS' if ok_aug else 'FAIL'} ({dt_raw:.1f}s / {dt_aug:.1f}s)")
+
+    # Summary — overall row uses the drain3-augmented syslog score.
+    total = len(INCIDENT_CASES) + len(THREAT_CASES) + len(MITRE_CASES) + len(SYSLOG_CASES)
+    correct = inc_correct + thr_correct + att_correct + sys_drain_correct
+    n_sys = len(SYSLOG_CASES)
     summary = (
         "\n## Summary\n\n"
         f"| Section | Correct | Total | Accuracy |\n"
@@ -292,14 +569,18 @@ def main():
         f"| Incident recognition | {inc_correct} | {len(INCIDENT_CASES)} | {inc_correct/len(INCIDENT_CASES):.0%} |\n"
         f"| Threat classification | {thr_correct} | {len(THREAT_CASES)} | {thr_correct/len(THREAT_CASES):.0%} |\n"
         f"| MITRE ATT&CK mapping | {att_correct} | {len(MITRE_CASES)} | {att_correct/len(MITRE_CASES):.0%} |\n"
-        f"| **Overall** | **{correct}** | **{total}** | **{correct/total:.0%}** |\n"
+        f"| Syslog triage (raw) | {sys_raw_correct} | {n_sys} | {sys_raw_correct/n_sys:.0%} |\n"
+        f"| Syslog triage (drain3) | {sys_drain_correct} | {n_sys} | {sys_drain_correct/n_sys:.0%} |\n"
+        f"| **Overall (with drain3)** | **{correct}** | **{total}** | **{correct/total:.0%}** |\n"
     )
     out_lines.insert(3, summary)
     print(summary)
 
-    with open("/home/explorer/sec_eval/results.md", "w") as f:
+    with open(args.output, "w") as f:
         f.write("".join(out_lines))
+    print(f"\nWrote {args.output}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
