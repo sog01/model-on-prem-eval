@@ -61,9 +61,11 @@ by `--output` (default: `results.md`).
 
 ## Files
 
-- `benchmark.py` — test cases, Ollama call, scoring, report generation.
-- `requirements.txt` — `drain3` (used to cluster syslog snippets into templates).
-- `results.md` — output of the most recent run (overwritten each run).
+- `benchmark.py` — test cases, Ollama call, scoring, resource sampler, report generation.
+- `requirements.txt` — `drain3` (syslog clustering) and `psutil` (CPU/RAM sampling).
+- `results-*.md` — per-model transcripts with per-case latency + GPU/CPU/RAM metrics.
+- `comparison.md` — full multi-model breakdown.
+- `conclusion.md` — single-model recommendation and reasoning.
 
 ## drain3 augmentation (section 4)
 
@@ -78,47 +80,74 @@ Section 4 runs each syslog case twice:
 The intent is to give the model a pre-clustered view of repetition, which
 should help on brute-force / probe-style cases (SYS-1, SYS-4, SYS-6, SYS-8).
 
-## Model comparison (latest run)
+## Model comparison (latest run, 2026-05-06)
 
-Four models, same 32 cases, same prompts, same scoring.
+Six models, same 32 cases, same prompts, same scoring. Hardware: RTX 4090
+(24 GB VRAM), AMD EPYC 7352 (48 cores), 251 GB RAM. All Q4_K_M.
 
-| Section | Foundation-Sec-8B | Llama-3.1-8B (generalist) | ZySec-7B-v1 | Lily-Cyber-7B-v0.2 |
-|---|---|---|---|---|
-| Incident recognition (7) | 4 (57%) | **7 (100%)** | 6 (86%) | 5 (71%) |
-| Threat classification (7) | **7 (100%)** | **7 (100%)** | 4 (57%) | 6 (86%) |
-| MITRE ATT&CK mapping (10) | **7 (70%)** | 2 (20%) | 2 (20%) | 4 (40%) |
-| Syslog triage — raw (8) | 5 (62%) | **8 (100%)** | 5 (62%) | 7 (88%) |
-| Syslog triage — drain3 (8) | 5 (62%) | **7 (88%)** | 5 (62%) | 1 (12%) |
-| **Overall (with drain3) / 32** | **23 (72%)** | **23 (72%)** | 17 (53%) | 16 (50%) |
+### Accuracy
+
+| Section | Foundation-Sec-8B | Llama-3.1-8B | ZySec-7B-v1 | Lily-Cyber-7B-v0.2 | Qwen3-14B | **Gemma3-27B** |
+|---|---|---|---|---|---|---|
+| Incident recognition (7) | 4 (57%) | 7 (100%) | 6 (86%) | 5 (71%) | 5 (71%) | **7 (100%)** |
+| Threat classification (7) | 7 (100%) | 7 (100%) | 4 (57%) | 6 (86%) | 5 (71%) | **7 (100%)** |
+| MITRE ATT&CK mapping (10) | 7 (70%) | 2 (20%) | 2 (20%) | 4 (40%) | 1 (10%) | **7 (70%)** |
+| Syslog triage — raw (8) | 5 (62%) | 8 (100%) | 5 (62%) | 7 (88%) | 5 (62%) | **8 (100%)** |
+| Syslog triage — drain3 (8) | 5 (62%) | 7 (88%) | 5 (62%) | 1 (12%) | 6 (75%) | 7 (88%) |
+| **Overall / 32 (drain3 syslog)** | 23 (72%) | 23 (72%) | 17 (53%) | 16 (50%) | 17 (53%) | **28 (88%)** |
+
+Bold = best in row. **Gemma3-27B leads by 5 cases**, with 100% on three
+sections and tied with Foundation-Sec on MITRE.
+
+### Performance (per-call, sampled every 250 ms)
+
+| Model | Avg s | p95 s | Peak GPU% | Steady GPU MB | Peak RAM MB |
+|---|---|---|---|---|---|
+| Lily-Cyber-7B | 0.47 | 1.23 | 93% | ~17,700 | 32,556 |
+| ZySec-7B-v1 | 0.55 | 1.26 | 93% | ~18,100 | 32,664 |
+| Foundation-Sec-8B | 0.70 | 0.85 | 81% | ~9,300 | 34,519 |
+| Llama-3.1-8B | 0.80 | 0.91 | 81% | ~18,500 | 32,769 |
+| **Gemma3-27B** | **1.60** | **1.79** | **94%** | **~20,500** | **33,778** |
+| Qwen3-14B | 4.53 | 5.14 | 93% | ~14,300 | 37,617 |
+
+All six fit fully on the 4090; none spilled to CPU RAM. Per-call metrics
+(GPU%, GPU MB, CPU%, RAM MB) are inlined in each `results-*.md` file's
+case headers.
+
+> **Qwen3-32B excluded.** Pulled and tested but its 32K-context KV cache
+> pushes it to 17%/83% CPU/GPU split on this hardware, dropping throughput
+> to ~3 tok/s. Would need an 8K-context override or a 48 GB+ GPU.
 
 Per-case transcripts: `results-foundation-sec.md`, `results-llama31.md`,
-`results-zysec.md`, `results-lily.md`. Full breakdown — including per-case
-tables for every section, the drain3 effect by model, and failure-mode
-notes — is in `comparison.md`. The single-model recommendation and
-tiebreaker reasoning is in `conclusion.md`.
+`results-zysec.md`, `results-lily.md`, `results-qwen3-14b.md`,
+`results-gemma3-27b.md`. Full breakdown is in `comparison.md`; the
+recommendation and reasoning is in `conclusion.md`.
 
 ### What this says
 
-- **Foundation-Sec earns its keep on MITRE ATT&CK (7/10), and only there.**
-  Every other model is ≤4/10. Cisco's curated cyber pre-training shows up
-  most clearly on technique-ID recall, which is the task most dependent on
-  domain-specific memorisation.
-- **Foundation-Sec and stock Llama-3.1-8B tie overall (23/32)** but the
-  shape is opposite: the generalist crushes binary triage (15/15 across
-  incident + threat, plus 8/8 raw syslog) while bombing MITRE. So the SOC
-  fine-tune trades binary-classification headroom for ATT&CK fluency.
-- **The "SOC-tuned" peers (ZySec, Lily) are the weakest overall.** Same size
-  class as Foundation-Sec, worse on every section except where they happen
-  to outdo it on incident classification.
-- **drain3 augmentation is model-dependent.** Foundation-Sec and ZySec
-  are unchanged by it, Llama-3.1 loses 1 case, and Lily collapses from
-  7/8 → 1/8 — the added structured block confuses it badly. drain3 is not
-  a universal lift; it's a hint some models can use.
+- **Gemma3-27B is the new top pick at 28/32 (88%).** It's the only model
+  that doesn't have a section it loses badly on — perfect on three of
+  five, tied with Foundation-Sec on MITRE. 1.6 s avg latency, ~20.5 GB
+  GPU, 128K context. Fits on a 4090 with headroom.
+- **Foundation-Sec's MITRE moat is gone.** Gemma3-27B matches its 7/10
+  from a generalist baseline, so the cyber pre-training no longer
+  justifies its incident-bias weakness. Still useful as a small (5 GB,
+  0.7 s) MITRE-only fallback.
+- **Qwen3-14B's reasoning mode kills its scores.** With `num_predict=400`
+  the model burns most of its budget inside `<think>...</think>` and
+  truncates before answering — visible most clearly on MITRE (1/10) and
+  in 5-10× higher latency than other sub-15B models. Disable reasoning
+  before re-evaluating.
+- **drain3 augmentation is model-dependent.** Foundation-Sec/ZySec
+  unchanged. Llama-3.1 loses 1, Gemma3 loses 1, Qwen3-14B gains 1, Lily
+  collapses 7→1. Don't ship drain3 as a universal pre-filter.
+- **The "SOC fine-tuned 7B" tier (ZySec, Lily) finishes at the bottom.**
+  A larger generalist beats all three SOC-tuned models on every section
+  except MITRE (where Gemma3 ties Foundation-Sec). On this benchmark,
+  model scale buys more than cyber fine-tuning.
 
-If your real workload is MITRE technique mapping or any task that rewards
-specific cyber knowledge recall, Foundation-Sec is the right pick. If your
-workload is binary "is this an incident" decisioning on raw logs, an
-un-tuned Llama-3.1-8B is matching or beating all three SOC fine-tunes here.
+For complex skill.md-style instruction following, **use `gemma3:27b`**.
+For tight VRAM or MITRE-only workloads, Foundation-Sec is the fallback.
 
 ## Scoring notes
 
