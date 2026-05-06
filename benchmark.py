@@ -27,11 +27,13 @@ from drain3.template_miner_config import TemplateMinerConfig
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_TAGS_URL = "http://localhost:11434/api/tags"
 DEFAULT_MODEL = "hf.co/Mungert/Foundation-Sec-8B-Instruct-GGUF:Q4_K_M"
+DEFAULT_NUM_PREDICT = 400
 
-# Set by main() from --model. The ask() helper reads this at call time so the
-# whole benchmark uses one consistent model without threading it through every
-# function.
+# Set by main() from --model and --num-predict. The ask() helper reads these at
+# call time so the whole benchmark uses one consistent setting without threading
+# it through every function.
 MODEL = DEFAULT_MODEL
+NUM_PREDICT = DEFAULT_NUM_PREDICT
 
 
 def drain3_summary(log: str) -> str:
@@ -361,7 +363,7 @@ def ask(prompt: str, system: str = "", timeout: int = 180) -> tuple[str, float, 
         "prompt": prompt,
         "system": system,
         "stream": False,
-        "options": {"temperature": 0.0, "num_predict": 400},
+        "options": {"temperature": 0.0, "num_predict": NUM_PREDICT},
     }).encode()
     req = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
     SAMPLER.start()
@@ -433,6 +435,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Output markdown file (default: results.md)",
     )
     p.add_argument(
+        "--num-predict", "-n",
+        type=int, default=DEFAULT_NUM_PREDICT,
+        help=(f"Max output tokens per call (default: {DEFAULT_NUM_PREDICT}). "
+              "Increase to ~1200 for thinking models so the answer doesn't get "
+              "truncated by the <think> trace."),
+    )
+    p.add_argument(
         "--list", "-l",
         action="store_true",
         help="List installed Ollama models and exit.",
@@ -441,8 +450,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    global MODEL
+    global MODEL, NUM_PREDICT
     args = parse_args(argv if argv is not None else sys.argv[1:])
+    NUM_PREDICT = args.num_predict
 
     if args.list:
         try:
